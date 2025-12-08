@@ -1,7 +1,13 @@
-import ChatAssistant from "../components/ChatAssistant";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { HSSEAssistant } from "@/components/HSSEAssistant";
 import { supabase } from "../lib/supabase";
-import { AlertTriangle, ClipboardCheck, GraduationCap } from "lucide-react";
+import {
+  AlertTriangle,
+  ClipboardCheck,
+  GraduationCap,
+  Activity,
+  RefreshCcw,
+} from "lucide-react";
 
 type StatGroup = {
   total: number;
@@ -17,293 +23,320 @@ type TrainingStatGroup = {
   expired: number;
 };
 
-type DashboardStats = {
-  nearMiss: StatGroup;
+type DashboardState = {
   incidents: StatGroup;
+  nearMisses: StatGroup;
   audits: StatGroup;
   training: TrainingStatGroup;
 };
 
-export default function Dashboard() {
-  const [stats, setStats] = useState<DashboardStats>({
-    nearMiss: { total: 0, open: 0, inProgress: 0, closed: 0 },
-    incidents: { total: 0, open: 0, inProgress: 0, closed: 0 },
-    audits: { total: 0, open: 0, inProgress: 0, closed: 0 },
-    training: { total: 0, valid: 0, expiringSoon: 0, expired: 0 },
-  });
+const emptyStatGroup: StatGroup = {
+  total: 0,
+  open: 0,
+  inProgress: 0,
+  closed: 0,
+};
 
-  const [loading, setLoading] = useState(true);
+const emptyTrainingStats: TrainingStatGroup = {
+  total: 0,
+  valid: 0,
+  expiringSoon: 0,
+  expired: 0,
+};
+
+export default function Dashboard() {
+  const [stats, setStats] = useState<DashboardState>({
+    incidents: emptyStatGroup,
+    nearMisses: emptyStatGroup,
+    audits: emptyStatGroup,
+    training: emptyTrainingStats,
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   useEffect(() => {
-    loadDashboardData();
+    void loadStats();
   }, []);
 
-  const loadDashboardData = async () => {
+  const loadStats = async () => {
     try {
-      const [incidents, inspections, training] = await Promise.all([
-        supabase.from("incidents").select("*"),
-        supabase.from("inspections").select("*"),
-        supabase.from("training_records").select("*"),
+      setLoading(true);
+      setError(null);
+
+      // NOTE:
+      // Adjust table names & columns to match your Supabase schema.
+      const [
+        { data: incidentRows, error: incidentError },
+        { data: nearMissRows, error: nearMissError },
+        { data: auditRows, error: auditError },
+        { data: trainingRows, error: trainingError },
+      ] = await Promise.all([
+        supabase.from("incidents").select("status"),
+        supabase.from("near_misses").select("status"),
+        supabase.from("audits").select("status"),
+        supabase.from("training_records").select("status, valid_until"),
       ]);
 
-      // Incidents stats
-      if (incidents.data) {
-        const incidentStats: StatGroup = {
-          total: incidents.data.length,
-          open: incidents.data.filter((i: any) => i.status === "open").length,
-          inProgress: incidents.data.filter(
-            (i: any) => i.status === "investigating"
-          ).length,
-          closed: incidents.data.filter(
-            (i: any) => i.status === "closed" || i.status === "resolved"
-          ).length,
-        };
-
-        setStats((prev) => ({
-          ...prev,
-          incidents: incidentStats,
-        }));
+      if (incidentError || nearMissError || auditError || trainingError) {
+        console.error(
+          "Dashboard stats errors:",
+          incidentError,
+          nearMissError,
+          auditError,
+          trainingError
+        );
+        throw new Error("Unable to load HSSE statistics from Supabase.");
       }
 
-      // Near Miss & Audits stats (from inspections)
-      if (inspections.data) {
-        const nearMissData = inspections.data.filter(
-          (i: any) => i.inspection_type !== "audit"
-        );
-        const auditData = inspections.data.filter(
-          (i: any) => i.inspection_type === "audit"
-        );
+      const computeStatusGroup = (rows: any[] | null): StatGroup => {
+        const group: StatGroup = { ...emptyStatGroup };
+        if (!rows || rows.length === 0) return group;
 
-        const nearMissStats: StatGroup = {
-          total: nearMissData.length,
-          open: nearMissData.filter((i: any) => i.status === "open").length,
-          inProgress: nearMissData.filter(
-            (i: any) => i.status === "in_progress"
-          ).length,
-          closed: nearMissData.filter((i: any) => i.status === "closed").length,
-        };
+        group.total = rows.length;
+        for (const row of rows) {
+          const status = String(row.status || "").toLowerCase();
+          if (status === "open") group.open += 1;
+          else if (status === "in_progress" || status === "in progress")
+            group.inProgress += 1;
+          else if (status === "closed" || status === "completed")
+            group.closed += 1;
+        }
+        return group;
+      };
 
-        const auditStats: StatGroup = {
-          total: auditData.length,
-          open: auditData.filter((i: any) => i.status === "open").length,
-          inProgress: auditData.filter(
-            (i: any) => i.status === "in_progress"
-          ).length,
-          closed: auditData.filter((i: any) => i.status === "closed").length,
-        };
+      const now = new Date();
+      const trainingStats: TrainingStatGroup = { ...emptyTrainingStats };
+      if (trainingRows && trainingRows.length > 0) {
+        trainingStats.total = trainingRows.length;
 
-        setStats((prev) => ({
-          ...prev,
-          nearMiss: nearMissStats,
-          audits: auditStats,
-        }));
+        for (const row of trainingRows as any[]) {
+          const status = String(row.status || "").toLowerCase();
+          if (status === "valid") {
+            trainingStats.valid += 1;
+          } else if (status === "expired") {
+            trainingStats.expired += 1;
+          } else if (status === "expiring_soon" || status === "expiring soon") {
+            trainingStats.expiringSoon += 1;
+          } else {
+            // Fallback using valid_until if you don’t store status explicitly
+            if (row.valid_until) {
+              const validUntil = new Date(row.valid_until);
+              const diffDays =
+                (validUntil.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+              if (diffDays < 0) trainingStats.expired += 1;
+              else if (diffDays <= 30) trainingStats.expiringSoon += 1;
+              else trainingStats.valid += 1;
+            }
+          }
+        }
       }
 
-      // Training stats
-      if (training.data) {
-        const now = new Date();
-        const thirtyDaysFromNow = new Date(
-          now.getTime() + 30 * 24 * 60 * 60 * 1000
-        );
-
-        const trainingStats: TrainingStatGroup = {
-          total: training.data.length,
-          valid: training.data.filter((t: any) => t.status === "valid").length,
-          expiringSoon: training.data.filter((t: any) => {
-            if (!t.expiry_date) return false;
-            const expiryDate = new Date(t.expiry_date);
-            return expiryDate <= thirtyDaysFromNow && expiryDate >= now;
-          }).length,
-          expired: training.data.filter(
-            (t: any) => t.status === "expired"
-          ).length,
-        };
-
-        setStats((prev) => ({
-          ...prev,
-          training: trainingStats,
-        }));
-      }
-    } catch (error) {
-      console.error("Error loading dashboard:", error);
+      setStats({
+        incidents: computeStatusGroup(incidentRows || []),
+        nearMisses: computeStatusGroup(nearMissRows || []),
+        audits: computeStatusGroup(auditRows || []),
+        training: trainingStats,
+      });
+      setLastUpdated(new Date());
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Something went wrong while loading HSSE stats.");
     } finally {
       setLoading(false);
     }
   };
 
-  if (loading) {
+  const formatDateTime = (date: Date | null) => {
+    if (!date) return "—";
+    return date.toLocaleString();
+  };
+
+  const renderStatCard = (
+    title: string,
+    icon: React.ReactNode,
+    group: StatGroup | TrainingStatGroup,
+    accentClass: string
+  ) => {
+    const total = "total" in group ? group.total : 0;
+
+    const getPercent = (value: number) =>
+      total > 0 ? Math.round((value / total) * 100) : 0;
+
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-gray-600">Loading dashboard...</div>
+      <div className="flex flex-col rounded-xl border bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div
+              className={`inline-flex h-9 w-9 items-center justify-center rounded-full ${accentClass}`}
+            >
+              {icon}
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                {title}
+              </p>
+              <p className="text-2xl font-semibold text-slate-900">{total}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-1 grid grid-cols-3 gap-2 text-xs">
+          {"open" in group && (
+            <div>
+              <p className="font-medium text-slate-600">Open</p>
+              <p className="text-slate-900">
+                {group.open}{" "}
+                <span className="text-slate-400">
+                  ({getPercent(group.open)}%)
+                </span>
+              </p>
+            </div>
+          )}
+          {"inProgress" in group && (
+            <div>
+              <p className="font-medium text-slate-600">In progress</p>
+              <p className="text-slate-900">
+                {group.inProgress}{" "}
+                <span className="text-slate-400">
+                  ({getPercent(group.inProgress)}%)
+                </span>
+              </p>
+            </div>
+          )}
+          {"closed" in group && (
+            <div>
+              <p className="font-medium text-slate-600">Closed</p>
+              <p className="text-slate-900">
+                {group.closed}{" "}
+                <span className="text-slate-400">
+                  ({getPercent(group.closed)}%)
+                </span>
+              </p>
+            </div>
+          )}
+
+          {"valid" in group && (
+            <div>
+              <p className="font-medium text-slate-600">Valid</p>
+              <p className="text-slate-900">
+                {group.valid}{" "}
+                <span className="text-slate-400">
+                  ({getPercent(group.valid)}%)
+                </span>
+              </p>
+            </div>
+          )}
+          {"expiringSoon" in group && (
+            <div>
+              <p className="font-medium text-slate-600">Expiring soon</p>
+              <p className="text-slate-900">
+                {group.expiringSoon}{" "}
+                <span className="text-slate-400">
+                  ({getPercent(group.expiringSoon)}%)
+                </span>
+              </p>
+            </div>
+          )}
+          {"expired" in group && (
+            <div>
+              <p className="font-medium text-slate-600">Expired</p>
+              <p className="text-slate-900">
+                {group.expired}{" "}
+                <span className="text-slate-400">
+                  ({getPercent(group.expired)}%)
+                </span>
+              </p>
+            </div>
+          )}
+        </div>
       </div>
     );
-  }
+  };
 
   return (
-    <div className="space-y-6">
+    <div className="flex h-full flex-col gap-4 p-4 bg-slate-50">
       {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-gray-900">Dashboard Overview</h2>
-        <p className="text-gray-600 mt-1">
-          Status of incidents, near misses, audits and training
-        </p>
-      </div>
-
-      {/* Metric cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {/* Near Miss */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Near Miss</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">
-                {stats.nearMiss.total}
-              </p>
-            </div>
-            <div className="bg-yellow-100 p-3 rounded-lg">
-              <AlertTriangle className="w-6 h-6 text-yellow-600" />
-            </div>
-          </div>
-          <div className="space-y-2 border-t pt-4">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Open</span>
-              <span className="text-sm font-semibold text-yellow-600">
-                {stats.nearMiss.open}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">In Progress</span>
-              <span className="text-sm font-semibold text-blue-600">
-                {stats.nearMiss.inProgress}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Closed</span>
-              <span className="text-sm font-semibold text-green-600">
-                {stats.nearMiss.closed}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Incidents */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Incidents</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">
-                {stats.incidents.total}
-              </p>
-            </div>
-            <div className="bg-orange-100 p-3 rounded-lg">
-              <AlertTriangle className="w-6 h-6 text-orange-600" />
-            </div>
-          </div>
-          <div className="space-y-2 border-t pt-4">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Open</span>
-              <span className="text-sm font-semibold text-yellow-600">
-                {stats.incidents.open}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">In Progress</span>
-              <span className="text-sm font-semibold text-blue-600">
-                {stats.incidents.inProgress}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Closed</span>
-              <span className="text-sm font-semibold text-green-600">
-                {stats.incidents.closed}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Audits */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Audits</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">
-                {stats.audits.total}
-              </p>
-            </div>
-            <div className="bg-blue-100 p-3 rounded-lg">
-              <ClipboardCheck className="w-6 h-6 text-blue-600" />
-            </div>
-          </div>
-          <div className="space-y-2 border-t pt-4">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Open</span>
-              <span className="text-sm font-semibold text-yellow-600">
-                {stats.audits.open}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">In Progress</span>
-              <span className="text-sm font-semibold text-blue-600">
-                {stats.audits.inProgress}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Closed</span>
-              <span className="text-sm font-semibold text-green-600">
-                {stats.audits.closed}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Training */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Training</p>
-              <p className="text-3xl font-bold text-gray-900 mt-2">
-                {stats.training.total}
-              </p>
-            </div>
-            <div className="bg-green-100 p-3 rounded-lg">
-              <GraduationCap className="w-6 h-6 text-green-600" />
-            </div>
-          </div>
-          <div className="space-y-2 border-t pt-4">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Valid</span>
-              <span className="text-sm font-semibold text-green-600">
-                {stats.training.valid}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Expiring Soon</span>
-              <span className="text-sm font-semibold text-orange-600">
-                {stats.training.expiringSoon}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Expired</span>
-              <span className="text-sm font-semibold text-red-600">
-                {stats.training.expired}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* HSSE AI Assistant */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-4 sm:p-6 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900">
-            HSSE AI Assistant
-          </h3>
-          <p className="text-gray-600 mt-1 text-sm">
-            Ask questions about incidents, near misses, audits and training.
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-900">
+            KOIL HSSE Dashboard
+          </h1>
+          <p className="text-sm text-slate-500">
+            Overview of incidents, near misses, audits, training & AI assistant.
           </p>
         </div>
-        <div className="p-4 sm:p-6">
-          <ChatAssistant />
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1 text-xs text-slate-500">
+            <Activity className="h-4 w-4" />
+            <span>Last updated: {formatDateTime(lastUpdated)}</span>
+          </div>
+          <button
+            type="button"
+            onClick={loadStats}
+            disabled={loading}
+            className="inline-flex items-center gap-1 rounded-lg border bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+          >
+            <RefreshCcw className="h-3.5 w-3.5" />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* Main layout */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        {/* Left: metrics */}
+        <div className="xl:col-span-2 space-y-4">
+          {/* Top summary cards */}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4">
+            {renderStatCard(
+              "Incidents",
+              <AlertTriangle className="h-4 w-4 text-amber-700" />,
+              stats.incidents,
+              "bg-amber-50"
+            )}
+            {renderStatCard(
+              "Near Misses",
+              <AlertTriangle className="h-4 w-4 text-orange-700" />,
+              stats.nearMisses,
+              "bg-orange-50"
+            )}
+            {renderStatCard(
+              "Audits",
+              <ClipboardCheck className="h-4 w-4 text-sky-700" />,
+              stats.audits,
+              "bg-sky-50"
+            )}
+            {renderStatCard(
+              "Training Records",
+              <GraduationCap className="h-4 w-4 text-emerald-700" />,
+              stats.training,
+              "bg-emerald-50"
+            )}
+          </div>
+
+          {/* Placeholder for future charts / tables */}
+          <div className="rounded-xl border bg-white p-4 shadow-sm">
+            <h2 className="text-sm font-semibold text-slate-800 mb-2">
+              HSSE Status
+            </h2>
+            <p className="text-xs text-slate-500">
+              This section is intentionally simple for now. You can later add
+              charts (e.g., incidents over time, audit completion, training
+              expiry trends) using the same data source.
+            </p>
+          </div>
+        </div>
+
+        {/* Right: HSSE AI Assistant */}
+        <div className="xl:col-span-1 h-[600px]">
+          <HSSEAssistant />
         </div>
       </div>
     </div>
