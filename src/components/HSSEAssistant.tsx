@@ -8,7 +8,7 @@ import {
   Sparkles,
   Zap,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { supabase } from "../lib/supabase";
 
 type Role = "user" | "assistant" | "system";
 
