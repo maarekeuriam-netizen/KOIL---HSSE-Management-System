@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { HSSEAssistant } from "./components/HSSEAssistant";
+import { HSSEAssistant } from "./HSSEAssistant";
 import { supabase } from "../lib/supabase";
 import {
   AlertTriangle,
